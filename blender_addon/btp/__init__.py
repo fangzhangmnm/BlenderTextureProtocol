@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Blender Texture Protocol",
     "blender": (4, 0, 0),
-    "version": (0, 2, 0),
+    "version": (0, 2, 1),
     "category": "Development",
     "author": "fangzhangmnm",
     "description": "外部贴图编辑器（WebPaint / AtlasMaker）通过 HTTP / WebRTC 与 Blender 同步纹理",
@@ -9,53 +9,13 @@ bl_info = {
     "support": "TESTING",
 }
 
-import os
-import platform as _platform
-import sys
-
-
-def _setup_vendor():
-    """Prepend the platform-appropriate vendor dir to sys.path so bundled
-    aiortc + deps (cp311 wheels) become importable. Run once at module load,
-    before any code that touches aiortc."""
-    addon_dir = os.path.dirname(__file__)
-    vendor_root = os.path.join(addon_dir, "vendor")
-    if not os.path.isdir(vendor_root):
-        return
-
-    system = _platform.system().lower()
-    machine = _platform.machine().lower()
-    pyver = f"py{sys.version_info.major}{sys.version_info.minor}"
-
-    if system == "windows" and machine in ("amd64", "x86_64"):
-        tag = f"win-amd64-{pyver}"
-    elif system == "linux" and machine == "x86_64":
-        tag = f"linux-x86_64-{pyver}"
-    elif system == "darwin" and machine == "arm64":
-        tag = f"macos-arm64-{pyver}"
-    elif system == "darwin" and machine == "x86_64":
-        tag = f"macos-x86_64-{pyver}"
-    else:
-        print(f"[BTP] no vendor dir for {system}/{machine}/{pyver}; "
-              f"WebRTC features will be unavailable", flush=True)
-        return
-
-    target = os.path.join(vendor_root, tag)
-    if os.path.isdir(target):
-        if target not in sys.path:
-            sys.path.insert(0, target)
-        print(f"[BTP] vendor loaded: {tag}", flush=True)
-    else:
-        print(f"[BTP] vendor dir missing: {tag}; "
-              f"WebRTC features will be unavailable", flush=True)
-
-
-_setup_vendor()
-
-
 import bpy
 
-from . import bridge, http_server, operators
+# Third-party deps (aiortc + crypto + ...) are declared in
+# blender_manifest.toml's `wheels = [...]` field. Blender 4.2+ installs
+# them into a per-extension isolated env so they don't pollute global
+# Python — that's why we no longer manipulate sys.path here.
+from . import bridge, http_server, operators, webrtc
 
 
 class BTPPreferences(bpy.types.AddonPreferences):
@@ -97,6 +57,7 @@ def _on_http_toggle(prefs):
 def register():
     bridge.start()
     operators.register()
+    webrtc.register()
     bpy.utils.register_class(BTPPreferences)
     # Honor the persisted preference on startup (default-on for sibling auto-connect).
     try:
@@ -113,5 +74,6 @@ def unregister():
     except RuntimeError:
         pass
     http_server.stop()
+    webrtc.unregister()
     operators.unregister()
     bridge.stop()

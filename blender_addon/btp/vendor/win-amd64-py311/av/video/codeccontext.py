@@ -1,1 +1,0 @@
-class VideoCodecContext: pass

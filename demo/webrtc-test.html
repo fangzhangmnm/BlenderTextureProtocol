@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<title>BTP WebRTC test</title>
+<style>
+  body { font-family: -apple-system, ui-monospace, monospace; padding: 1em; max-width: 900px; margin: 0 auto; }
+  h1 { margin-top: 0; }
+  .row { margin: 0.5em 0; }
+  button { padding: 0.4em 0.9em; margin: 0.2em; font: inherit; cursor: pointer; }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
+  #log { background: #0c0c0c; color: #b9f9b9; padding: 0.8em; height: 360px; overflow-y: scroll; white-space: pre-wrap; font-size: 12px; border-radius: 4px; }
+  .ok { color: #88dd88; }
+  .err { color: #ff7777; }
+  .meta { color: #888; }
+  .state { display: inline-block; padding: 0.2em 0.6em; border-radius: 3px; background: #eee; margin-left: 0.5em; }
+</style>
+</head>
+<body>
+
+<h1>BTP WebRTC end-to-end test</h1>
+<p>Browser ↔ Blender via DataChannel. Blender 必须装好 BTP 0.2.1+ 并启用 (HTTP toggle 默认开)。</p>
+
+<div class="row">
+  <button id="connect">Connect</button>
+  <button id="close" disabled>Close</button>
+  <span class="state" id="state">idle</span>
+</div>
+
+<div class="row">
+  <button id="get-scene" disabled>GET /v1/scene</button>
+  <button id="get-textures" disabled>GET /v1/textures</button>
+  <button id="get-selection" disabled>GET /v1/selection</button>
+  <button id="get-first-data" disabled>GET first texture /data (byte compare vs HTTP)</button>
+</div>
+
+<div id="log"></div>
+
+<script type="module">
+const BTP_BASE = "http://127.0.0.1:18765";
+
+const $ = (id) => document.getElementById(id);
+const stateEl = $("state");
+const logEl = $("log");
+
+function log(msg, cls = "") {
+  const line = document.createElement("div");
+  line.textContent = `${new Date().toLocaleTimeString()}  ${msg}`;
+  if (cls) line.className = cls;
+  logEl.appendChild(line);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+function setState(s) { stateEl.textContent = s; }
+
+let pc = null;
+let dc = null;
+let nextId = 1;
+const pending = new Map();
+
+const rpcButtons = ["get-scene", "get-textures", "get-selection", "get-first-data"];
+
+function setConnected(yes) {
+  $("connect").disabled = yes;
+  $("close").disabled = !yes;
+  for (const id of rpcButtons) $(id).disabled = !yes;
+}
+
+async function connect() {
+  log("creating RTCPeerConnection...");
+  pc = new RTCPeerConnection();
+  pc.oniceconnectionstatechange = () => log(`ICE state: ${pc.iceConnectionState}`, "meta");
+  pc.onconnectionstatechange = () => {
+    log(`connection state: ${pc.connectionState}`, "meta");
+    setState(pc.connectionState);
+  };
+
+  dc = pc.createDataChannel("btp");
+  dc.onopen = () => {
+    log("DataChannel OPEN", "ok");
+    setState("open");
+    setConnected(true);
+  };
+  dc.onclose = () => {
+    log("DataChannel closed", "meta");
+    setState("closed");
+    setConnected(false);
+  };
+  dc.onmessage = (ev) => {
+    const resp = JSON.parse(ev.data);
+    const p = pending.get(resp.id);
+    if (p) { pending.delete(resp.id); p(resp); }
+    else log(`unmatched response id=${resp.id}`, "err");
+  };
+
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+  log("offer SDP created, waiting ICE gather...");
+  await new Promise((resolve) => {
+    if (pc.iceGatheringState === "complete") return resolve();
+    pc.onicegatheringstatechange = () => {
+      if (pc.iceGatheringState === "complete") resolve();
+    };
+  });
+  log(`offer ready (${pc.localDescription.sdp.length} bytes), POSTing to /v1/exec...`);
+
+  const httpResp = await fetch(`${BTP_BASE}/v1/exec`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      command: "webrtc.set_remote_offer",
+      params: { sdp: pc.localDescription.sdp },
+    }),
+  });
+  if (!httpResp.ok) {
+    const t = await httpResp.text();
+    log(`POST /v1/exec failed: ${httpResp.status}: ${t}`, "err");
+    return;
+  }
+  const { answer_sdp } = await httpResp.json();
+  log(`got answer (${answer_sdp.length} bytes), applying...`);
+  await pc.setRemoteDescription({ type: "answer", sdp: answer_sdp });
+  log("waiting for DataChannel to open (ICE may take a few seconds)...");
+}
+
+async function rpc(method, path) {
+  if (!dc || dc.readyState !== "open") {
+    log("not connected", "err");
+    return null;
+  }
+  const id = `req-${nextId++}`;
+  log(`-> ${method} ${path}  id=${id}`);
+  const promise = new Promise((resolve) => pending.set(id, resolve));
+  dc.send(JSON.stringify({ id, method, path }));
+  const resp = await promise;
+  log(`<- ${resp.status}  id=${resp.id}`, resp.status >= 400 ? "err" : "ok");
+  return resp;
+}
+
+function decodeBody(resp) {
+  if (!resp || !resp.body_b64) return null;
+  const bin = atob(resp.body_b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes;
+}
+
+$("connect").onclick = () => {
+  setConnected(false);
+  connect().catch((e) => log(`connect failed: ${e.message}`, "err"));
+};
+
+$("close").onclick = async () => {
+  if (pc) { await pc.close(); pc = null; dc = null; }
+  setConnected(false);
+  setState("idle");
+};
+
+$("get-scene").onclick = async () => {
+  const resp = await rpc("GET", "/v1/scene");
+  const body = decodeBody(resp);
+  if (body) log("   " + new TextDecoder().decode(body));
+};
+
+$("get-textures").onclick = async () => {
+  const resp = await rpc("GET", "/v1/textures");
+  const body = decodeBody(resp);
+  if (body) {
+    const arr = JSON.parse(new TextDecoder().decode(body));
+    log(`   ${arr.length} textures: [${arr.map((t) => t.name).join(", ")}]`);
+  }
+};
+
+$("get-selection").onclick = async () => {
+  const resp = await rpc("GET", "/v1/selection");
+  const body = decodeBody(resp);
+  if (body) log("   " + new TextDecoder().decode(body));
+};
+
+$("get-first-data").onclick = async () => {
+  const list = await rpc("GET", "/v1/textures");
+  const arr = JSON.parse(new TextDecoder().decode(decodeBody(list)));
+  if (arr.length === 0) { log("no textures to fetch", "err"); return; }
+  const first = arr[0].name;
+  log(`   first texture: ${first}`);
+
+  const dcResp = await rpc("GET", `/v1/textures/${encodeURIComponent(first)}/data`);
+  const dcBytes = decodeBody(dcResp);
+  log(`   DC bytes: ${dcBytes ? dcBytes.length : 0}`);
+
+  // Fetch same via HTTP for byte-level compare.
+  const httpRes = await fetch(`${BTP_BASE}/v1/textures/${encodeURIComponent(first)}/data`);
+  const httpBytes = new Uint8Array(await httpRes.arrayBuffer());
+  log(`   HTTP bytes: ${httpBytes.length}`);
+
+  let same = dcBytes && dcBytes.length === httpBytes.length;
+  if (same) {
+    for (let i = 0; i < dcBytes.length; i++) {
+      if (dcBytes[i] !== httpBytes[i]) { same = false; break; }
+    }
+  }
+  log(`   byte-identical: ${same}`, same ? "ok" : "err");
+};
+
+log("ready. click Connect.");
+</script>
+</body>
+</html>
