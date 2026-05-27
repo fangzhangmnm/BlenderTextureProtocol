@@ -1,0 +1,20 @@
+# 构建产物
+dist/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Node (smoke test 用 stdlib，目前没 node_modules，留这条预防将来)
+node_modules/
+
+# Plan B 磁盘备份（如果将来加，单机用户数据，不进 git）
+.btp_backup/
+backup/
