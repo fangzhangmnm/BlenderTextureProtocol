@@ -1,11 +1,11 @@
 bl_info = {
     "name": "Blender Texture Protocol",
     "blender": (4, 0, 0),
-    "version": (0, 2, 1),
+    "version": (0, 3, 0),
     "category": "Development",
     "author": "fangzhangmnm",
-    "description": "外部贴图编辑器（WebPaint / AtlasMaker）通过 HTTP / WebRTC 与 Blender 同步纹理",
-    "location": "Edit > Preferences > Add-ons > Blender Texture Protocol",
+    "description": "Let external editors (WebPaint / AtlasMaker) read & write textures in Blender without import/export",
+    "location": "View3D / Image Editor / Shader Editor > N-panel > BTP",
     "support": "TESTING",
 }
 
@@ -15,21 +15,27 @@ import bpy
 # blender_manifest.toml's `wheels = [...]` field. Blender 4.2+ installs
 # them into a per-extension isolated env so they don't pollute global
 # Python — that's why we no longer manipulate sys.path here.
-from . import bridge, http_server, operators, webrtc
+from . import bridge, http_server, operators, panels, signaling, webrtc
 
 
 class BTPPreferences(bpy.types.AddonPreferences):
     bl_idname = __package__
 
     enable_localhost_http: bpy.props.BoolProperty(
-        name="启用 localhost HTTP 服务",
-        description="允许本机应用 (AtlasMaker / curl / 脚本) 通过 127.0.0.1 访问 API。仅绑定 localhost，不暴露到局域网。默认开启，让 sibling 应用直连即用；关掉这个 toggle 后只能通过 WebRTC 牵手访问 (未来功能)。",
-        default=True,
+        name="Same-machine access (HTTP on 127.0.0.1)",
+        description=(
+            "When on, external editors running on this same PC can read/write "
+            "Blender textures via a local HTTP server. Bound to localhost only — "
+            "not exposed to LAN. Off by default; turn it on (here, or from the "
+            "BTP N-panel) when an editor on this PC needs to connect."
+        ),
+        default=False,
         update=lambda self, ctx: _on_http_toggle(self),
     )
 
     http_port: bpy.props.IntProperty(
-        name="HTTP 端口",
+        name="Port",
+        description="Port to bind on 127.0.0.1 (only editable while same-machine access is closed)",
         default=18765,
         min=1024,
         max=65535,
@@ -38,13 +44,15 @@ class BTPPreferences(bpy.types.AddonPreferences):
 
     def draw(self, context):
         layout = self.layout
+        layout.label(
+            text="All session controls live in the 'BTP' tab of the N-panel in 3D Viewport / Image Editor / Shader Editor.",
+            icon='INFO',
+        )
         col = layout.column()
         col.prop(self, "enable_localhost_http")
         sub = col.row()
-        sub.enabled = self.enable_localhost_http
+        sub.enabled = not self.enable_localhost_http
         sub.prop(self, "http_port")
-        col.separator()
-        col.label(text="WebRTC 牵手 (PIN 配对) 即将加入", icon='INFO')
 
 
 def _on_http_toggle(prefs):
@@ -57,15 +65,18 @@ def _on_http_toggle(prefs):
 def register():
     bridge.start()
     operators.register()
+    signaling.register()
+    panels.register()
     webrtc.register()
     bpy.utils.register_class(BTPPreferences)
-    # Honor the persisted preference on startup (default-on for sibling auto-connect).
+    # Default-off now (consent on each session) — only start if user previously
+    # turned it on and Blender restored the saved value as True.
     try:
         prefs = bpy.context.preferences.addons[__package__].preferences
         if prefs.enable_localhost_http:
             http_server.start(prefs.http_port)
     except (KeyError, AttributeError) as e:
-        print(f"[BTP] could not auto-start HTTP server: {e}", flush=True)
+        print(f"[BTP] could not check HTTP preference at register: {e}", flush=True)
 
 
 def unregister():
@@ -75,5 +86,7 @@ def unregister():
         pass
     http_server.stop()
     webrtc.unregister()
+    panels.unregister()
+    signaling.unregister()
     operators.unregister()
     bridge.stop()

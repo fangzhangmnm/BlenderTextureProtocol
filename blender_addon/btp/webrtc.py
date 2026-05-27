@@ -34,16 +34,20 @@ import asyncio
 import base64
 import json
 import threading
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
-from aiortc import RTCPeerConnection, RTCSessionDescription
+from . import api, bridge, sdp_envelope
 
-from . import api, bridge
+# aiortc + its 13 wheels are heavy. Import lazily inside _handle_offer
+# so pure-HTTP users (AtlasMaker) never pay the cold-start cost.
+# Subsequent WebRTC calls reuse the already-imported module.
+if TYPE_CHECKING:
+    from aiortc import RTCPeerConnection
 
 
 _loop: Optional[asyncio.AbstractEventLoop] = None
 _loop_thread: Optional[threading.Thread] = None
-_pc: Optional[RTCPeerConnection] = None
+_pc: Optional["RTCPeerConnection"] = None
 
 
 # ─── Event loop in a background thread ───
@@ -72,12 +76,45 @@ def _run(coro, timeout: float = 30.0):
 # ─── Exec commands (signaling + control) ───
 
 def cmd_set_remote_offer(params):
-    """Accept a browser-side offer SDP; return our answer SDP after ICE gather."""
-    sdp = params.get("sdp")
-    if not sdp:
+    """PWA-as-offerer path (used by demo/webrtc-test.html via /v1/exec).
+    Accept a browser-side offer SDP (raw or BTP1 envelope); return our
+    answer SDP both raw and as a BTP1 envelope."""
+    sdp_in = params.get("sdp")
+    if not sdp_in:
         raise ValueError("missing 'sdp' in params")
-    answer_sdp = _run(_handle_offer(sdp), timeout=15.0)
-    return {"answer_sdp": answer_sdp}
+    try:
+        offer_sdp = sdp_envelope.decode(sdp_in)
+    except ValueError as e:
+        raise ValueError(f"could not decode offer SDP: {e}")
+    answer_sdp = _run(_handle_offer(offer_sdp), timeout=15.0)
+    return {
+        "answer_sdp": answer_sdp,
+        "answer_envelope": sdp_envelope.encode(answer_sdp),
+    }
+
+
+def cmd_create_offer(params):
+    """Blender-as-offerer path (used by N-panel manual paste flow).
+    Generate an offer SDP, hold the PC open waiting for the remote answer."""
+    offer_sdp = _run(_create_offer(), timeout=15.0)
+    return {
+        "offer_sdp": offer_sdp,
+        "offer_envelope": sdp_envelope.encode(offer_sdp),
+    }
+
+
+def cmd_set_remote_answer(params):
+    """Blender-as-offerer path: accept the PWA's answer SDP (raw or BTP1
+    envelope) and apply it. DataChannel opens shortly after via DC.on('open')."""
+    sdp_in = params.get("sdp")
+    if not sdp_in:
+        raise ValueError("missing 'sdp' in params")
+    try:
+        answer_sdp = sdp_envelope.decode(sdp_in)
+    except ValueError as e:
+        raise ValueError(f"could not decode answer SDP: {e}")
+    _run(_set_remote_answer(answer_sdp), timeout=10.0)
+    return {"ok": True}
 
 
 def cmd_close(params):
@@ -103,7 +140,57 @@ def cmd_status(params):
 
 # ─── PeerConnection wiring ───
 
+async def _create_offer() -> str:
+    """Blender-as-offerer. Closes any existing PC, creates a fresh one with
+    a DataChannel, generates an offer, gathers ICE. Returns offer SDP."""
+    # Lazy import — same reason as _handle_offer below.
+    from aiortc import RTCPeerConnection
+
+    global _pc
+    if _pc is not None:
+        try:
+            await _pc.close()
+        except Exception:
+            pass
+        _pc = None
+
+    pc = RTCPeerConnection()
+    _pc = pc
+
+    # DC must be created BEFORE createOffer so the SDP advertises an
+    # application m-line for the data channel.
+    dc = pc.createDataChannel("btp")
+    _attach_channel(dc)
+
+    @pc.on("connectionstatechange")
+    def on_connectionstatechange():
+        print(f"[BTP webrtc] connection: {pc.connectionState}", flush=True)
+
+    offer = await pc.createOffer()
+    await pc.setLocalDescription(offer)
+
+    while pc.iceGatheringState != "complete":
+        await asyncio.sleep(0.05)
+
+    return pc.localDescription.sdp
+
+
+async def _set_remote_answer(sdp: str) -> None:
+    """Blender-as-offerer: apply the remote PWA's answer SDP."""
+    from aiortc import RTCSessionDescription
+
+    if _pc is None:
+        raise RuntimeError(
+            "No pending offer. Click 'Open for another device' to start a session first."
+        )
+    answer = RTCSessionDescription(sdp=sdp, type="answer")
+    await _pc.setRemoteDescription(answer)
+
+
 async def _handle_offer(sdp: str) -> str:
+    # Lazy import: aiortc + all 13 wheels only load on first WebRTC use.
+    from aiortc import RTCPeerConnection, RTCSessionDescription
+
     global _pc
     if _pc is not None:
         try:
@@ -205,6 +292,8 @@ def _b64_json(obj) -> str:
 # ─── Lifecycle (called by __init__.py) ───
 
 def register() -> None:
+    api.register_exec("webrtc.create_offer", cmd_create_offer)
+    api.register_exec("webrtc.set_remote_answer", cmd_set_remote_answer)
     api.register_exec("webrtc.set_remote_offer", cmd_set_remote_offer)
     api.register_exec("webrtc.close", cmd_close)
     api.register_exec("webrtc.status", cmd_status)
