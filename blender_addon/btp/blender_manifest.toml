@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
 id = "btp"
-version = "0.1.1"
+version = "0.2.0"
 name = "Blender Texture Protocol"
 tagline = "外部贴图编辑器同步纹理 (HTTP / WebRTC)"
 maintainer = "fangzhangmnm <mnmfangzhang@gmail.com>"

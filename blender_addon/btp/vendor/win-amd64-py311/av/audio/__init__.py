@@ -1,0 +1,1 @@
+class AudioStream: pass
