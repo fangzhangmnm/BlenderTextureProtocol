@@ -1,7 +1,7 @@
 # BTP client — CHANGELOG
 
 Version history of the protocol contract + JS client bundle. This is where
-"what changed between versions" lives; [`spec.md`](./spec.md) describes only the
+"what changed between versions" lives; [`README.md`](./README.md) describes only the
 current contract. `BUNDLE_VERSION` (in `btp.js`) tracks this file's latest entry.
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
@@ -39,7 +39,7 @@ Addon (Blender side), shipped together as `btp-0.4.0`:
 Initial release — localhost HTTP transport, PC-side complete.
 
 - 9 endpoints: `scene`, `textures` (list/get/get-data/put-data/create/rename),
-  `selection`, `exec`. See `spec.md`.
+  `selection`, `exec`. See `README.md`.
 - `BTPClient` over `fetch` to `http://127.0.0.1:18765`; `BTPError` with stable
   machine-readable `.code`.
 - Overwrite semantics, no conflict detection; identity = image `name`.

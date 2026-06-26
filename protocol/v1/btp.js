@@ -1,5 +1,5 @@
 // Blender Texture Protocol — JavaScript client.
-// Bundled with: ./spec.md  (same dir, same version).
+// Bundled with: ./README.md  (same dir, same version).
 //
 // Version policy:
 //   BUNDLE_VERSION bumps when the protocol's semantics change or when this
@@ -102,7 +102,7 @@ export class BTPClient {
   }
 
   // ─── Ad-hoc commands ───
-  // Server-defined; not version-protected. See spec.md > /v1/exec.
+  // Server-defined; not version-protected. See README.md > /v1/exec.
 
   async exec(command, params = {}) {
     return this._send("POST", "/v1/exec", {

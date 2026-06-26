@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>BTP — Send a texture to Blender</title>
+<style>
+  body { font-family: -apple-system, ui-monospace, monospace; max-width: 640px; margin: 0 auto; padding: 1.2em; }
+  h1 { font-size: 1.25em; }
+  .step { margin: 0.9em 0; padding: 0.8em; border: 1px solid #ddd; border-radius: 6px; }
+  .step.off { opacity: 0.45; }
+  h3 { margin: 0 0 0.5em; font-size: 1em; }
+  textarea { width: 100%; height: 4.5em; font: 11px ui-monospace, monospace; padding: 0.4em; box-sizing: border-box; resize: vertical; }
+  input { font: inherit; padding: 0.4em; width: 14em; }
+  button { padding: 0.55em 1.1em; margin: 0.3em 0.2em 0 0; font: inherit; cursor: pointer; border: 1px solid #888; border-radius: 4px; background: #f6f6f6; }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
+  #state { float: right; font-size: 0.8em; padding: 0.15em 0.6em; border-radius: 3px; background: #eee; }
+  #log { background: #0c0c0c; color: #b9f9b9; padding: 0.7em; height: 150px; overflow-y: auto; white-space: pre-wrap; font-size: 11px; border-radius: 4px; margin-top: 0.8em; }
+  .ok { color: #88dd88; } .err { color: #ff7777; } .meta { color: #888; }
+  canvas { border: 1px solid #ccc; vertical-align: middle; }
+</style>
+</head>
+<body>
+<h1>Send a texture to Blender <span id="state">idle</span></h1>
+<p class="meta">
+  Minimal end-to-end: pair with a running Blender over WebRTC and push one PNG.
+  Needs the BTP add-on installed + enabled in Blender. Serve this page over
+  http(s) (ES modules + WebRTC need a server, not <code>file://</code>).
+</p>
+
+<div class="step" id="s1">
+  <h3>① In Blender's BTP panel click "Open for Another Device", paste its code here</h3>
+  <textarea id="offer" placeholder="BTP1:…"></textarea>
+  <button id="connect">Connect</button>
+</div>
+
+<div class="step off" id="s2">
+  <h3>② Paste this response code back into Blender's "Paste Response from Device"</h3>
+  <textarea id="answer" readonly placeholder="appears after Connect"></textarea>
+  <button id="copy" disabled>Copy response</button>
+</div>
+
+<div class="step off" id="s3">
+  <h3>③ Send a test PNG into a Blender texture</h3>
+  <canvas id="preview" width="96" height="96"></canvas>
+  target image name: <input id="name" placeholder="T_Body">
+  <button id="send" disabled>Send PNG</button>
+  <div class="meta">PUT into an existing image; if it doesn't exist, creates it.</div>
+</div>
+
+<div id="log"></div>
+
+<script type="module">
+import { BTPClient, BTPError, connectRemote, ManualSignaling } from "../protocol/v1/index.js";
+
+const $ = (id) => document.getElementById(id);
+const logEl = $("log");
+const log = (m, c = "") => {
+  const d = document.createElement("div");
+  d.textContent = `${new Date().toLocaleTimeString()}  ${m}`;
+  if (c) d.className = c;
+  logEl.appendChild(d); logEl.scrollTop = logEl.scrollHeight;
+};
+const setState = (s) => { $("state").textContent = s; };
+const enable = (stepId) => $(stepId).classList.remove("off");
+
+let conn = null, client = null;
+
+// ── a visible test PNG (gradient + a counter so each send looks different) ──
+let counter = 0;
+function makeTestPng() {
+  const c = document.createElement("canvas");
+  c.width = c.height = 512;
+  const g = c.getContext("2d");
+  const grad = g.createLinearGradient(0, 0, 512, 512);
+  grad.addColorStop(0, `hsl(${(counter * 47) % 360} 80% 55%)`);
+  grad.addColorStop(1, `hsl(${(counter * 47 + 120) % 360} 80% 45%)`);
+  g.fillStyle = grad; g.fillRect(0, 0, 512, 512);
+  g.fillStyle = "white"; g.font = "bold 40px sans-serif"; g.textAlign = "center";
+  g.fillText("BTP", 256, 240);
+  g.font = "24px sans-serif";
+  g.fillText(`send #${++counter}`, 256, 290);
+  // tiny preview
+  const p = $("preview").getContext("2d");
+  p.drawImage(c, 0, 0, 96, 96);
+  return new Promise((res) => c.toBlob((b) => res(b), "image/png"));
+}
+
+$("connect").onclick = async () => {
+  const offer = $("offer").value.trim();
+  if (!offer) { log("Paste Blender's connection code first", "err"); return; }
+  $("connect").disabled = true;
+  try {
+    conn = await connectRemote({
+      signaling: ManualSignaling({
+        offer,
+        onAnswer: (code) => {
+          $("answer").value = code;
+          $("copy").disabled = false;
+          enable("s2");
+          log("response code ready — paste it back into Blender", "ok");
+          navigator.clipboard?.writeText(code).then(
+            () => log("(response auto-copied to clipboard)", "meta"), () => {});
+        },
+      }),
+      onStateChange: (s) => { setState(s); log(`connection: ${s}`, "meta"); },
+    });
+    client = new BTPClient({ baseUrl: "", fetch: conn.fetch });
+    log("channel open ✓ — connected to Blender", "ok");
+    try {
+      const sel = await client.getSelection();
+      $("name").value = sel.texture || "T_Body";
+      log(`selected image in Blender: ${sel.texture || "(none)"}`, "meta");
+    } catch { $("name").value = "T_Body"; }
+    enable("s3"); $("send").disabled = false;
+  } catch (e) {
+    log(`connect failed: ${e.message}`, "err");
+    $("connect").disabled = false;
+  }
+};
+
+$("copy").onclick = () => navigator.clipboard.writeText($("answer").value)
+  .then(() => log("copied ✓", "ok"), () => log("copy failed — select & copy manually", "err"));
+
+$("send").onclick = async () => {
+  const name = $("name").value.trim();
+  if (!name) { log("enter a target image name", "err"); return; }
+  $("send").disabled = true;
+  try {
+    const png = await makeTestPng();
+    try {
+      const meta = await client.putTextureData(name, png);
+      log(`PUT ${name} ✓ — now ${meta.width}×${meta.height}, packed=${meta.packed}`, "ok");
+    } catch (e) {
+      if (e instanceof BTPError && e.code === "texture_not_found") {
+        const meta = await client.createTexture(name, png);
+        log(`'${name}' didn't exist → created ✓ (${meta.width}×${meta.height})`, "ok");
+      } else { throw e; }
+    }
+  } catch (e) {
+    log(`send failed: ${e.message}${e instanceof BTPError ? " ["+e.code+"]" : ""}`, "err");
+  } finally {
+    $("send").disabled = false;
+  }
+};
+
+log("ready. Open Blender's BTP panel → 'Open for Another Device'.");
+</script>
+</body>
+</html>

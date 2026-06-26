@@ -9,7 +9,7 @@ through `tmp_file.png` and a file manager.
 Cross-device transport (WebRTC DataChannel, Blender-as-offerer, manual-paste
 pairing) implemented and statically tested; **real iPad↔Blender ICE handshake
 not yet verified on-device**. PIN/relay signaling and zero-paste reconnect are
-on the roadmap (see `protocol/v1/spec.md` §远程 transport).
+on the roadmap (see `protocol/v1/README.md`).
 
 ## What it solves
 
@@ -60,7 +60,7 @@ const conn   = await connectRemote({ signaling: ManualSignaling({ offer, onAnswe
 const remote = new BTPClient({ baseUrl: "", fetch: conn.fetch });   // identical API
 ```
 
-See [`protocol/v1/spec.md`](./protocol/v1/spec.md) for the endpoint table,
+See [`protocol/v1/README.md`](./protocol/v1/README.md) for the endpoint table,
 metadata fields, error codes, and forward-compatibility rules.
 
 ## v1 endpoints
@@ -125,7 +125,7 @@ edit. Project-local; doesn't affect external contributors.
   not by exposing the HTTP port. Why WebRTC even on a LAN: an HTTPS PWA may
   not `fetch http://<lan-ip>` (mixed content), so the texture editor can't
   hit a LAN HTTP server directly — the DataChannel is the way through. See
-  `protocol/v1/spec.md` §远程 transport.
+  `protocol/v1/README.md`.
 - **Same machine, cross-origin OK** — CORS headers are sent; HTTPS PWAs
   on github.io / Vercel / etc. can `fetch()` `http://127.0.0.1:18765`
   because browsers whitelist localhost as a secure context.

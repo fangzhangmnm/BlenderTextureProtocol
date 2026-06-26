@@ -19,7 +19,7 @@
 //   const client = new BTPClient({ baseUrl: "", fetch });
 //
 // From here on the two are indistinguishable — same 9 endpoints, same errors.
-// See spec.md for the wire contract and §"远程 transport" for the handshake.
+// See README.md for the wire contract and §"远程 transport" for the handshake.
 
 export { BTPClient, BTPError, PROTOCOL, BUNDLE_VERSION } from "./btp.js";
 export { connectRemote, channelFetch } from "./webrtc-fetch.js";

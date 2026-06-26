@@ -3,7 +3,7 @@
 // This .d.ts IS the machine-readable contract: a TypeScript consumer (or an
 // agent) reads it to learn the full API without reading implementation. The
 // runtime is plain ESM `.js` (zero-build, loads directly in browser/node);
-// these types describe it. Human contract: ./spec.md. History: ./CHANGELOG.md.
+// these types describe it. Human contract: ./README.md. History: ./CHANGELOG.md.
 
 export const PROTOCOL: "v1";
 export const BUNDLE_VERSION: string;
