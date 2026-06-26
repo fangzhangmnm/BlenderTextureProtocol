@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BTP — Browser loopback self-test</title>
+<style>
+  body { font-family: -apple-system, ui-monospace, monospace; max-width: 720px; margin: 0 auto; padding: 1.2em; }
+  h1 { font-size: 1.3em; }
+  #banner { font-size: 1.4em; font-weight: bold; padding: 0.6em 1em; border-radius: 6px; margin: 1em 0; background: #eee; }
+  #banner.pass { background: #d6f5d6; color: #137013; }
+  #banner.fail { background: #f8d6d6; color: #a01414; }
+  .row { padding: 0.35em 0.6em; border-bottom: 1px solid #eee; display: flex; gap: 0.7em; }
+  .ok { color: #137013; } .bad { color: #a01414; }
+  .tag { display: inline-block; width: 2.6em; font-weight: bold; }
+  .note { color: #666; font-size: 0.9em; }
+  code { background: #f2f2f2; padding: 0 0.3em; border-radius: 3px; }
+</style>
+</head>
+<body>
+<h1>BTP browser loopback self-test</h1>
+<p class="note">
+  Verifies the vendored client (<code>protocol/v1/</code>) end-to-end inside a
+  real browser — no Blender, no iPad, no signaling server. It spins up a second
+  in-page <code>RTCPeerConnection</code> as a Blender stand-in (offerer + a stub
+  of the 9 endpoints), then runs the <em>real</em> path: <code>connectRemote</code>
+  → <code>ManualSignaling</code> → SDP envelope (CompressionStream) → genuine
+  WebRTC handshake → <code>frame.js</code> chunking over a real DataChannel →
+  <code>channelFetch</code> → <code>BTPClient</code>, including multi-MB bodies.
+  The only thing it cannot cover is the real Blender/aiortc peer.
+</p>
+<div id="banner">running…</div>
+<div id="rows"></div>
+
+<script type="module">
+import { BTPClient, BTPError, connectRemote, ManualSignaling, BUNDLE_VERSION } from "../protocol/v1/index.js";
+import { encodeSDP, decodeSDP } from "../protocol/v1/sdp-envelope.js";
+import { frame, Reassembler } from "../protocol/v1/frame.js";
+
+const rows = document.getElementById("rows");
+let failures = 0;
+function check(name, ok, extra = "") {
+  if (!ok) failures++;
+  const div = document.createElement("div");
+  div.className = "row";
+  div.innerHTML = `<span class="tag ${ok ? "ok" : "bad"}">${ok ? "ok" : "FAIL"}</span>` +
+    `<span>${name}${extra ? ` <span class="note">— ${extra}</span>` : ""}</span>`;
+  rows.appendChild(div);
+}
+
+// ─── Blender stand-in: real RTCPeerConnection that offers + serves stub endpoints ───
+
+const BIG = new Uint8Array(1_500_000);
+for (let i = 0; i < BIG.length; i++) BIG[i] = (i * 31 + 7) & 0xff;
+let lastPutBody = null;
+
+function stubHandle(method, path, body) {
+  const json = (obj, status = 200) => ({
+    status, headers: { "Content-Type": "application/json; charset=utf-8" },
+    body: new TextEncoder().encode(JSON.stringify(obj)),
+  });
+  if (method === "GET" && path === "/v1/scene")
+    return json({ blend_filepath: "D:/loopback.blend", unit: "METRIC", active_object_name: "Cube" });
+  if (method === "GET" && path === "/v1/textures")
+    return json([{ name: "T_Body", width: 2048, height: 2048 }]);
+  if (method === "GET" && path === "/v1/textures/BIG/data")
+    return { status: 200, headers: { "Content-Type": "image/png" }, body: BIG };
+  if (method === "PUT" && path === "/v1/textures/T/data") {
+    lastPutBody = body;
+    return json({ name: "T", width: 64, height: 64, packed: true });
+  }
+  return json({ error: { code: "texture_not_found", message: `no ${path}` } }, 404);
+}
+
+function attachStub(channel) {
+  channel.binaryType = "arraybuffer";
+  const reasm = new Reassembler();
+  const b64ToBytes = (b) => Uint8Array.from(atob(b), (c) => c.charCodeAt(0));
+  const bytesToB64 = (bytes) => {
+    let bin = "";
+    for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+    return btoa(bin);
+  };
+  channel.addEventListener("message", (ev) => {
+    const req = reasm.accept(ev.data);
+    if (!req) return;
+    const body = req.body_b64 ? b64ToBytes(req.body_b64) : null;
+    const res = stubHandle(req.method, req.path, body);
+    const env = { id: req.id, status: res.status, headers: res.headers, body_b64: res.body ? bytesToB64(res.body) : null };
+    for (const f of frame(req.id, JSON.stringify(env))) channel.send(f);
+  });
+}
+
+function iceComplete(pc) {
+  if (pc.iceGatheringState === "complete") return Promise.resolve();
+  return new Promise((r) => pc.addEventListener("icegatheringstatechange", function h() {
+    if (pc.iceGatheringState === "complete") { pc.removeEventListener("icegatheringstatechange", h); r(); }
+  }));
+}
+
+async function makeBlenderPeer() {
+  const pc = new RTCPeerConnection({ iceServers: [] });
+  const dc = pc.createDataChannel("btp");
+  attachStub(dc);
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+  await iceComplete(pc);
+  const offerCode = await encodeSDP(pc.localDescription.sdp);
+  return { pc, offerCode };
+}
+
+function eqBytes(a, b) {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
+
+async function main() {
+  check(`module loaded (bundle ${BUNDLE_VERSION})`, BUNDLE_VERSION === "1.1.0", "expect 1.1.0");
+
+  const blender = await makeBlenderPeer();
+  check("Blender stand-in produced an offer code", blender.offerCode.startsWith("BTP1:"));
+
+  const conn = await connectRemote({
+    signaling: ManualSignaling({
+      offer: blender.offerCode,
+      onAnswer: async (answerCode) => {
+        const sdp = await decodeSDP(answerCode);
+        await blender.pc.setRemoteDescription({ type: "answer", sdp });
+      },
+    }),
+  });
+  check("real WebRTC handshake completed (channel open)", conn.connectionState === "connected" || conn.connectionState === "connecting");
+  check("peer DTLS fingerprint parsed", !!conn.remoteFingerprint, conn.remoteFingerprint || "");
+
+  const client = new BTPClient({ baseUrl: "", fetch: conn.fetch });
+
+  const scene = await client.getScene();
+  check("getScene round-trips", scene.blend_filepath === "D:/loopback.blend");
+
+  const list = await client.listTextures();
+  check("listTextures", Array.isArray(list) && list[0]?.name === "T_Body");
+
+  const meta = await client.putTextureData("T", BIG);
+  check("PUT 1.5 MB — server got identical bytes (multi-frame request)", lastPutBody && eqBytes(lastPutBody, BIG));
+  check("PUT response parsed", meta.name === "T" && meta.packed === true);
+
+  const blob = await client.getTextureData("BIG");
+  const got = new Uint8Array(await blob.arrayBuffer());
+  check("GET 1.5 MB — client got identical bytes (multi-frame response)", eqBytes(got, BIG));
+
+  let threw = null;
+  try { await client.getTextureMetadata("__nope__"); } catch (e) { threw = e; }
+  check("404 → BTPError code texture_not_found",
+    threw instanceof BTPError && threw.code === "texture_not_found" && threw.status === 404);
+
+  conn.close();
+  blender.pc.close();
+}
+
+main()
+  .catch((e) => { check(`uncaught: ${e.message}`, false); })
+  .finally(() => {
+    const b = document.getElementById("banner");
+    b.textContent = failures === 0 ? "PASS — all checks green" : `FAIL — ${failures} check(s) failed`;
+    b.className = failures === 0 ? "pass" : "fail";
+  });
+</script>
+</body>
+</html>
