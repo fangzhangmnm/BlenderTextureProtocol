@@ -5,11 +5,12 @@ over an HTTP / WebRTC API, so external editors — desktop PWAs, tablet apps,
 or your own scripts — can read and write Blender content without going
 through `tmp_file.png` and a file manager.
 
-**Status: v1.1 alpha** — PC-side complete & verified (localhost HTTP).
-Cross-device transport (WebRTC DataChannel, Blender-as-offerer, manual-paste
-pairing) implemented and statically tested; **real iPad↔Blender ICE handshake
-not yet verified on-device**. PIN/relay signaling and zero-paste reconnect are
-on the roadmap (see `protocol/v1/README.md`).
+**Status: v1.1 alpha** — both transports working. Localhost HTTP (same machine)
+and cross-device WebRTC DataChannel (Blender-as-offerer, manual-paste pairing)
+are verified end-to-end against a real Blender — handshake + a texture PUT round
+trip. Same-machine access requires per-session consent (off at each Blender
+launch; open it from the BTP panel). PIN/relay signaling and zero-paste reconnect
+are on the roadmap (see `protocol/v1/README.md`).
 
 ## What it solves
 

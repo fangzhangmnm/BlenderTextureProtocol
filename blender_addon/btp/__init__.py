@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Blender Texture Protocol",
     "blender": (4, 0, 0),
-    "version": (0, 4, 0),
+    "version": (0, 4, 1),
     "category": "Development",
     "author": "fangzhangmnm",
     "description": "Let external editors (WebPaint / AtlasMaker) read & write textures in Blender without import/export",
@@ -26,8 +26,9 @@ class BTPPreferences(bpy.types.AddonPreferences):
         description=(
             "When on, external editors running on this same PC can read/write "
             "Blender textures via a local HTTP server. Bound to localhost only — "
-            "not exposed to LAN. Off by default; turn it on (here, or from the "
-            "BTP N-panel) when an editor on this PC needs to connect."
+            "not exposed to LAN. Off at the start of every Blender session "
+            "(per-session consent); turn it on (here, or from the BTP N-panel) "
+            "when an editor on this PC needs to connect."
         ),
         default=False,
         update=lambda self, ctx: _on_http_toggle(self),
@@ -69,14 +70,18 @@ def register():
     panels.register()
     webrtc.register()
     bpy.utils.register_class(BTPPreferences)
-    # Default-off now (consent on each session) — only start if user previously
-    # turned it on and Blender restored the saved value as True.
+    # Per-session consent (BTP hard rule: consent before opening any port each
+    # session). The enable toggle is a *persisted* AddonPreference, so without
+    # this it would stick "on" across restarts and auto-open the port. Force it
+    # off at every session start: the user must re-open same-machine access from
+    # the panel each session. (Setting it False fires the update callback →
+    # http_server.stop(), a no-op when nothing is running.)
     try:
         prefs = bpy.context.preferences.addons[__package__].preferences
         if prefs.enable_localhost_http:
-            http_server.start(prefs.http_port)
+            prefs.enable_localhost_http = False
     except (KeyError, AttributeError) as e:
-        print(f"[BTP] could not check HTTP preference at register: {e}", flush=True)
+        print(f"[BTP] could not reset HTTP preference at register: {e}", flush=True)
 
 
 def unregister():
