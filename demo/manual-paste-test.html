@@ -23,74 +23,44 @@
 
 <h1>Pair with Blender <span class="state" id="state">idle</span></h1>
 <p style="color:#666;">
-  Blender starts the pairing (click <b>"Open for Another Device"</b> in
-  Blender's BTP N-panel). It will give you a connection code. Paste it
-  below, and this page produces a response code to paste back.
+  Reference harness for the <b>vendored client</b> (<code>protocol/v1/index.js</code>) —
+  it drives the real <code>connectRemote</code> + <code>BTPClient</code>, so it
+  doubles as the iPad↔Blender pairing test. Serve it over http(s); ES modules
+  and (on Safari) WebRTC need a server, not <code>file://</code>.
+</p>
+<p style="color:#666;">
+  In Blender's BTP N-panel click <b>"Open for Another Device"</b> to get a
+  connection code. Paste it below; this page produces a response code to paste
+  back into Blender's <b>"Paste Response from Device"</b>.
 </p>
 
 <div class="step">
-  <h3>① Paste Blender's connection code</h3>
+  <h3>① Paste Blender's connection code, then Pair</h3>
   <textarea id="offer-in" placeholder="BTP1:..."></textarea>
-  <button id="gen">Generate response</button>
+  <button id="pair">Pair</button>
 </div>
 
 <div class="step">
   <h3>② Copy this response back to Blender</h3>
-  <textarea id="answer-out" readonly placeholder="Response code appears here after Generate"></textarea>
+  <textarea id="answer-out" readonly placeholder="Response code appears here after Pair"></textarea>
   <button id="copy-answer" disabled>Copy response</button>
-  <p style="color:#666; font-size:0.9em; margin: 0.3em 0;">
-    Then in Blender, click <b>"Paste Response from Device"</b> and paste this in.
-  </p>
 </div>
 
 <div class="step">
   <h3>③ Use the channel (after Blender accepts the response)</h3>
-  <button id="get-scene" disabled>GET /v1/scene</button>
-  <button id="get-textures" disabled>GET /v1/textures</button>
-  <button id="get-selection" disabled>GET /v1/selection</button>
+  <button id="get-scene" disabled>getScene</button>
+  <button id="get-textures" disabled>listTextures</button>
+  <button id="get-selection" disabled>getSelection</button>
   <button id="close" disabled>Close</button>
 </div>
 
 <div id="log"></div>
 
 <script type="module">
-// ── inline copy of sdp-envelope.js (file:// can't load local modules) ──
-const ENVELOPE_PREFIX = "BTP1:";
+import { BTPClient, connectRemote, ManualSignaling } from "../protocol/v1/index.js";
 
-async function encodeSDP(sdp) {
-  const input = new TextEncoder().encode(sdp);
-  const cs = new CompressionStream("gzip");
-  const writer = cs.writable.getWriter();
-  writer.write(input);
-  writer.close();
-  const gz = new Uint8Array(await new Response(cs.readable).arrayBuffer());
-  let b64 = btoa(String.fromCharCode(...gz));
-  b64 = b64.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-  return ENVELOPE_PREFIX + b64;
-}
-
-async function decodeSDP(envelope) {
-  const s = envelope.trim();
-  if (s.startsWith("v=0")) return s;
-  if (!s.startsWith(ENVELOPE_PREFIX)) {
-    throw new Error(`Not a BTP code. Expected '${ENVELOPE_PREFIX}...' or raw SDP.`);
-  }
-  let b64 = s.slice(ENVELOPE_PREFIX.length);
-  b64 = b64.replace(/-/g, "+").replace(/_/g, "/");
-  while (b64.length % 4) b64 += "=";
-  const gz = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
-  const ds = new DecompressionStream("gzip");
-  const writer = ds.writable.getWriter();
-  writer.write(gz);
-  writer.close();
-  return new TextDecoder().decode(await new Response(ds.readable).arrayBuffer());
-}
-
-// ── demo logic ──
 const $ = (id) => document.getElementById(id);
-const logEl = $("log");
-const stateEl = $("state");
-
+const logEl = $("log"), stateEl = $("state");
 function log(msg, cls = "") {
   const line = document.createElement("div");
   line.textContent = `${new Date().toLocaleTimeString()}  ${msg}`;
@@ -100,127 +70,58 @@ function log(msg, cls = "") {
 }
 function setState(s) { stateEl.textContent = s; }
 
-let pc = null;
-let dc = null;
-let nextId = 1;
-const pending = new Map();
-
 const rpcButtons = ["get-scene", "get-textures", "get-selection"];
+let conn = null, client = null;
 
-function setupDC(channel) {
-  dc = channel;
-  dc.onopen = () => {
-    log("Channel OPEN", "ok");
-    setState("open");
+$("pair").onclick = async () => {
+  const offer = $("offer-in").value.trim();
+  if (!offer) { log("Paste Blender's connection code first", "err"); return; }
+  $("pair").disabled = true;
+  try {
+    conn = await connectRemote({
+      signaling: ManualSignaling({
+        offer,
+        onAnswer: (code) => {
+          $("answer-out").value = code;
+          $("copy-answer").disabled = false;
+          log(`response ready (${code.length} chars) — paste it into Blender`, "ok");
+        },
+      }),
+      onStateChange: (s) => { setState(s); log(`conn: ${s}`, "meta"); },
+    });
+    client = new BTPClient({ baseUrl: "", fetch: conn.fetch });
+    log(`channel OPEN. peer fingerprint: ${conn.remoteFingerprint || "?"}`, "ok");
     for (const id of rpcButtons) $(id).disabled = false;
     $("close").disabled = false;
-  };
-  dc.onclose = () => {
-    log("Channel closed", "meta");
-    setState("closed");
-    for (const id of rpcButtons) $(id).disabled = true;
-  };
-  dc.onmessage = (ev) => {
-    const resp = JSON.parse(ev.data);
-    const p = pending.get(resp.id);
-    if (p) { pending.delete(resp.id); p(resp); }
-  };
-}
-
-async function generateResponse() {
-  const offerCode = $("offer-in").value.trim();
-  if (!offerCode) { log("Paste Blender's connection code first", "err"); return; }
-  let offerSdp;
-  try {
-    offerSdp = await decodeSDP(offerCode);
-  } catch (e) { log(`Decode failed: ${e.message}`, "err"); return; }
-
-  log("creating RTCPeerConnection...");
-  pc = new RTCPeerConnection();
-  pc.oniceconnectionstatechange = () => log(`ICE: ${pc.iceConnectionState}`, "meta");
-  pc.onconnectionstatechange = () => {
-    log(`conn: ${pc.connectionState}`, "meta");
-    setState(pc.connectionState);
-  };
-  // Blender created the DataChannel; we receive it here.
-  pc.ondatachannel = (ev) => {
-    log(`got DataChannel from Blender: label=${ev.channel.label}`, "meta");
-    setupDC(ev.channel);
-  };
-
-  await pc.setRemoteDescription({ type: "offer", sdp: offerSdp });
-  const answer = await pc.createAnswer();
-  await pc.setLocalDescription(answer);
-  log("answer created, waiting ICE gather...");
-  await new Promise((resolve) => {
-    if (pc.iceGatheringState === "complete") return resolve();
-    pc.onicegatheringstatechange = () => {
-      if (pc.iceGatheringState === "complete") resolve();
-    };
-  });
-
-  const envelope = await encodeSDP(pc.localDescription.sdp);
-  $("answer-out").value = envelope;
-  $("copy-answer").disabled = false;
-  log(`response ready: SDP ${pc.localDescription.sdp.length} bytes → BTP1 ${envelope.length} chars. Now paste in Blender.`, "ok");
-}
-
-async function rpc(method, path) {
-  if (!dc || dc.readyState !== "open") {
-    log("not connected", "err");
-    return null;
+  } catch (e) {
+    log(`pair failed: ${e.message}`, "err");
+    $("pair").disabled = false;
   }
-  const id = `req-${nextId++}`;
-  log(`-> ${method} ${path}`);
-  const promise = new Promise((resolve) => pending.set(id, resolve));
-  dc.send(JSON.stringify({ id, method, path }));
-  const resp = await promise;
-  log(`<- ${resp.status}`, resp.status >= 400 ? "err" : "ok");
-  return resp;
-}
-
-function decodeBody(resp) {
-  if (!resp || !resp.body_b64) return null;
-  const bin = atob(resp.body_b64);
-  const bytes = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-  return new TextDecoder().decode(bytes);
-}
-
-$("gen").onclick = () => { generateResponse().catch((e) => log(`fail: ${e.message}`, "err")); };
+};
 
 $("copy-answer").onclick = async () => {
-  try {
-    await navigator.clipboard.writeText($("answer-out").value);
-    log("response copied to clipboard ✓", "ok");
-  } catch {
-    const ta = $("answer-out");
-    ta.select(); ta.setSelectionRange(0, ta.value.length);
-    document.execCommand("copy");
-    log("response copied (fallback) ✓", "ok");
+  try { await navigator.clipboard.writeText($("answer-out").value); log("copied ✓", "ok"); }
+  catch {
+    const ta = $("answer-out"); ta.select(); ta.setSelectionRange(0, ta.value.length);
+    document.execCommand("copy"); log("copied (fallback) ✓", "ok");
   }
 };
 
-$("close").onclick = async () => {
-  if (pc) { await pc.close(); pc = null; dc = null; }
-  setState("idle");
+async function run(label, fn) {
+  try { const r = await fn(); log(`${label}: ${JSON.stringify(r)}`, "ok"); }
+  catch (e) { log(`${label} failed: ${e.message}`, "err"); }
+}
+$("get-scene").onclick = () => run("getScene", () => client.getScene());
+$("get-textures").onclick = () => run("listTextures", () => client.listTextures());
+$("get-selection").onclick = () => run("getSelection", () => client.getSelection());
+$("close").onclick = () => {
+  conn?.close(); conn = client = null; setState("idle");
   for (const id of rpcButtons) $(id).disabled = true;
-  $("close").disabled = true;
+  $("close").disabled = true; $("pair").disabled = false;
+  log("closed", "meta");
 };
 
-$("get-scene").onclick = async () => {
-  const r = await rpc("GET", "/v1/scene"); log("   " + decodeBody(r));
-};
-$("get-textures").onclick = async () => {
-  const r = await rpc("GET", "/v1/textures");
-  const arr = JSON.parse(decodeBody(r));
-  log(`   ${arr.length} textures: [${arr.map((t) => t.name).join(", ")}]`);
-};
-$("get-selection").onclick = async () => {
-  const r = await rpc("GET", "/v1/selection"); log("   " + decodeBody(r));
-};
-
-log("ready. Click 'Open for Another Device' in Blender first.");
+log("ready. Click 'Open for Another Device' in Blender, then paste its code above.");
 </script>
 </body>
 </html>

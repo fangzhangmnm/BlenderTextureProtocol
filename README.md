@@ -5,8 +5,11 @@ over an HTTP / WebRTC API, so external editors — desktop PWAs, tablet apps,
 or your own scripts — can read and write Blender content without going
 through `tmp_file.png` and a file manager.
 
-**Status: v1.0 alpha** — PC-side complete (localhost HTTP transport);
-cross-device iPad transport (WebRTC + handshake) in progress.
+**Status: v1.1 alpha** — PC-side complete & verified (localhost HTTP).
+Cross-device transport (WebRTC DataChannel, Blender-as-offerer, manual-paste
+pairing) implemented and statically tested; **real iPad↔Blender ICE handshake
+not yet verified on-device**. PIN/relay signaling and zero-paste reconnect are
+on the roadmap (see `protocol/v1/spec.md` §远程 transport).
 
 ## What it solves
 
@@ -41,15 +44,20 @@ You should get JSON with the current `.blend` path and active object.
 ## For sibling integrators
 
 The wire spec and JS client live in [`protocol/v1/`](./protocol/v1/).
-Vendor the whole directory into your app (no `npm install`, no CDN):
+Vendor the whole directory into your app (no `npm install`, no CDN) and import
+only from `index.js`:
 
 ```js
-import { BTPClient } from "./vendor/btp/v1/btp.js";
+import { BTPClient, connectRemote, ManualSignaling } from "./vendor/btp/v1/index.js";
 
+// Same machine (PC) — localhost HTTP, zero setup:
 const client   = new BTPClient();                     // default http://127.0.0.1:18765
 const textures = await client.listTextures();
-const blob     = await client.getTextureData("T_Body");
 await client.putTextureData("T_Body", pngBlob);       // pixels packed into .blend
+
+// Cross device (iPad) — WebRTC, paired once via Blender's N-panel:
+const conn   = await connectRemote({ signaling: ManualSignaling({ offer, onAnswer }) });
+const remote = new BTPClient({ baseUrl: "", fetch: conn.fetch });   // identical API
 ```
 
 See [`protocol/v1/spec.md`](./protocol/v1/spec.md) for the endpoint table,
@@ -91,6 +99,10 @@ python3 scripts/package.py
 # Integration tests against a live Blender (addon must be installed & enabled)
 node scripts/smoke_test_btp_js.mjs
 
+# Remote-transport tests (no Blender / browser needed — mock DataChannel):
+node scripts/smoke_test_webrtc_transport.mjs   # client stack + framing end-to-end
+python3 scripts/test_frame_python.py           # JS↔Python wire compatibility
+
 # Convenience debug scripts (curl wrappers)
 ./scripts/debug/list.sh
 ./scripts/debug/put_checker.sh T_test
@@ -108,8 +120,12 @@ edit. Project-local; doesn't affect external contributors.
   separate `ED_image_undo_*` stack that doesn't yet have a Python entry
   point. Workaround: don't rely on redo across BTP mutations. See
   [`docs/blender5-api-notes.md`](./docs/blender5-api-notes.md).
-- **localhost-only in v1** — server binds `127.0.0.1`. Cross-device
-  access (iPad → desktop) lands with the WebRTC transport (v1.x).
+- **localhost binds `127.0.0.1`** — not exposed to LAN (a LAN port scan
+  can't even see it). Cross-device access goes through the WebRTC transport,
+  not by exposing the HTTP port. Why WebRTC even on a LAN: an HTTPS PWA may
+  not `fetch http://<lan-ip>` (mixed content), so the texture editor can't
+  hit a LAN HTTP server directly — the DataChannel is the way through. See
+  `protocol/v1/spec.md` §远程 transport.
 - **Same machine, cross-origin OK** — CORS headers are sent; HTTPS PWAs
   on github.io / Vercel / etc. can `fetch()` `http://127.0.0.1:18765`
   because browsers whitelist localhost as a secure context.

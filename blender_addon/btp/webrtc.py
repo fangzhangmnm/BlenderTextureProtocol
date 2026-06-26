@@ -1,34 +1,33 @@
 """
 WebRTC DataChannel transport for BTP.
 
-Signaling pattern: **browser-as-offerer** (browsers can't accept inbound
-connections; aiortc on Blender side answers).
+Signaling pattern: **Blender-as-offerer** (the artist clicks "Open for
+Another Device" in the N-panel; Blender creates the offer, the device
+answers). The browser-as-offerer path was removed — one offerer model only.
 
-1. Browser:  `pc = new RTCPeerConnection(); pc.createDataChannel("btp");
-              offer = await pc.createOffer(); await pc.setLocalDescription(offer);`
-              (wait for ICE gather complete; non-trickle SDP)
-2. Blender:  client `POST /v1/exec`:
-              `{ "command": "webrtc.set_remote_offer", "params": { "sdp": "v=0\\r\\n..." } }`
-              returns `{ "answer_sdp": "v=0\\r\\n..." }` after our ICE gather.
-3. Browser:  `await pc.setRemoteDescription({ type:"answer", sdp: answer_sdp });`
-4. DataChannel opens. Browser sends JSON envelopes (see frame format below);
-   Blender dispatches each envelope to `api.handle(...)` on the main thread
-   (same code path used by the HTTP server), sends JSON response.
+Handshake (manual paste; a relay can replace the paste later):
+1. Blender:  N-panel "Open for Another Device" → exec `webrtc.create_offer`
+             → offer SDP (BTP1 envelope), shown + copied to clipboard.
+2. Device:   pastes the code; its WebRTC stack answers and produces a
+             response code (BTP1 envelope).
+3. Blender:  "Paste Response from Device" → exec `webrtc.set_remote_answer`.
+4. DataChannel opens. The device sends request envelopes; Blender dispatches
+   each to `api.handle(...)` on the main thread (same path as the HTTP
+   server) and sends a response envelope back.
 
-Frame format (sender → server):
-    { "id": "<client-chosen>",
-      "method": "GET" | "PUT" | "POST" | "DELETE",
-      "path": "/v1/textures/T_body/data",
-      "headers": { ... },             // optional
-      "body_b64": "<base64 PNG>" }    // optional
+Framing (both directions): a logical envelope is split into chunk frames so
+large bodies (a 2048² PNG GET, a WebPaint PUT) survive the DataChannel
+max-message-size. Mirror of protocol/v1/frame.js — keep the two in sync.
 
-Frame format (server → sender):
-    { "id": "<echoed>",
-      "status": 200,
-      "headers": { ... },
-      "body_b64": "<base64 body or null>" }
+    Frame (JSON text):  { "id", "i", "n", "p" }   (i=chunk index, n=count,
+                                                    p=slice of envelope JSON)
 
-Single PeerConnection at a time in v0.2 (multi-client deferred).
+    Request envelope:   { "id", "method", "path", "headers"?, "body_b64"? }
+    Response envelope:  { "id", "status", "headers", "body_b64" | null }
+
+A raw (un-framed) envelope is still accepted on input for backward compat.
+
+Single PeerConnection at a time (multi-client deferred).
 """
 import asyncio
 import base64
@@ -36,11 +35,10 @@ import json
 import threading
 from typing import Optional, TYPE_CHECKING
 
-from . import api, bridge, sdp_envelope
+from . import api, bridge, frame as framing, sdp_envelope
 
-# aiortc + its 13 wheels are heavy. Import lazily inside _handle_offer
+# aiortc + its 13 wheels are heavy. Import lazily inside _create_offer
 # so pure-HTTP users (AtlasMaker) never pay the cold-start cost.
-# Subsequent WebRTC calls reuse the already-imported module.
 if TYPE_CHECKING:
     from aiortc import RTCPeerConnection
 
@@ -75,27 +73,9 @@ def _run(coro, timeout: float = 30.0):
 
 # ─── Exec commands (signaling + control) ───
 
-def cmd_set_remote_offer(params):
-    """PWA-as-offerer path (used by demo/webrtc-test.html via /v1/exec).
-    Accept a browser-side offer SDP (raw or BTP1 envelope); return our
-    answer SDP both raw and as a BTP1 envelope."""
-    sdp_in = params.get("sdp")
-    if not sdp_in:
-        raise ValueError("missing 'sdp' in params")
-    try:
-        offer_sdp = sdp_envelope.decode(sdp_in)
-    except ValueError as e:
-        raise ValueError(f"could not decode offer SDP: {e}")
-    answer_sdp = _run(_handle_offer(offer_sdp), timeout=15.0)
-    return {
-        "answer_sdp": answer_sdp,
-        "answer_envelope": sdp_envelope.encode(answer_sdp),
-    }
-
-
 def cmd_create_offer(params):
-    """Blender-as-offerer path (used by N-panel manual paste flow).
-    Generate an offer SDP, hold the PC open waiting for the remote answer."""
+    """Blender-as-offerer: generate an offer SDP, hold the PC open waiting
+    for the remote answer. Returns the offer both raw and as a BTP1 envelope."""
     offer_sdp = _run(_create_offer(), timeout=15.0)
     return {
         "offer_sdp": offer_sdp,
@@ -104,8 +84,8 @@ def cmd_create_offer(params):
 
 
 def cmd_set_remote_answer(params):
-    """Blender-as-offerer path: accept the PWA's answer SDP (raw or BTP1
-    envelope) and apply it. DataChannel opens shortly after via DC.on('open')."""
+    """Blender-as-offerer: accept the device's answer SDP (raw or BTP1
+    envelope) and apply it. The DataChannel opens shortly after."""
     sdp_in = params.get("sdp")
     if not sdp_in:
         raise ValueError("missing 'sdp' in params")
@@ -143,7 +123,7 @@ def cmd_status(params):
 async def _create_offer() -> str:
     """Blender-as-offerer. Closes any existing PC, creates a fresh one with
     a DataChannel, generates an offer, gathers ICE. Returns offer SDP."""
-    # Lazy import — same reason as _handle_offer below.
+    # Lazy import: aiortc + all 13 wheels only load on first WebRTC use.
     from aiortc import RTCPeerConnection
 
     global _pc
@@ -176,7 +156,7 @@ async def _create_offer() -> str:
 
 
 async def _set_remote_answer(sdp: str) -> None:
-    """Blender-as-offerer: apply the remote PWA's answer SDP."""
+    """Blender-as-offerer: apply the remote device's answer SDP."""
     from aiortc import RTCSessionDescription
 
     if _pc is None:
@@ -187,63 +167,27 @@ async def _set_remote_answer(sdp: str) -> None:
     await _pc.setRemoteDescription(answer)
 
 
-async def _handle_offer(sdp: str) -> str:
-    # Lazy import: aiortc + all 13 wheels only load on first WebRTC use.
-    from aiortc import RTCPeerConnection, RTCSessionDescription
-
-    global _pc
-    if _pc is not None:
-        try:
-            await _pc.close()
-        except Exception:
-            pass
-        _pc = None
-
-    pc = RTCPeerConnection()
-    _pc = pc
-
-    @pc.on("datachannel")
-    def on_datachannel(channel):
-        _attach_channel(channel)
-
-    @pc.on("connectionstatechange")
-    def on_connectionstatechange():
-        print(f"[BTP webrtc] connection: {pc.connectionState}", flush=True)
-
-    offer = RTCSessionDescription(sdp=sdp, type="offer")
-    await pc.setRemoteDescription(offer)
-    answer = await pc.createAnswer()
-    await pc.setLocalDescription(answer)
-
-    # Non-trickle: wait for ICE gathering to finish before returning SDP.
-    while pc.iceGatheringState != "complete":
-        await asyncio.sleep(0.05)
-
-    return pc.localDescription.sdp
-
-
 def _attach_channel(channel) -> None:
     print(f"[BTP webrtc] datachannel open: label={channel.label}", flush=True)
+    reasm = framing.Reassembler()
 
     @channel.on("message")
     def on_message(msg):
-        # Sync handler. Runs on the loop thread; bridge.dispatch_to_main
-        # blocks here until Blender's main thread services the request.
-        # Single-client sequential is OK in v0.2.
-        _handle_envelope(channel, msg)
+        # Sync handler on the loop thread. bridge.dispatch_to_main blocks
+        # here until Blender's main thread services the request. Single-client
+        # sequential is OK.
+        env = reasm.accept(msg)
+        if env is not None:  # None = mid-message, wait for more frames
+            _handle_envelope(channel, env)
 
     @channel.on("close")
     def on_close():
         print(f"[BTP webrtc] datachannel closed: label={channel.label}", flush=True)
 
 
-def _handle_envelope(channel, msg) -> None:
-    req_id = None
+def _handle_envelope(channel, req: dict) -> None:
+    req_id = req.get("id")
     try:
-        if isinstance(msg, bytes):
-            msg = msg.decode("utf-8")
-        req = json.loads(msg)
-        req_id = req.get("id")
         method = req.get("method", "GET")
         path = req.get("path", "/")
         body_b64 = req.get("body_b64")
@@ -280,7 +224,8 @@ def _handle_envelope(channel, msg) -> None:
 
 def _send(channel, response: dict) -> None:
     try:
-        channel.send(json.dumps(response))
+        for f in framing.frames(response["id"] or "", json.dumps(response)):
+            channel.send(f)
     except Exception as e:
         print(f"[BTP webrtc] channel.send failed: {e}", flush=True)
 
@@ -294,7 +239,6 @@ def _b64_json(obj) -> str:
 def register() -> None:
     api.register_exec("webrtc.create_offer", cmd_create_offer)
     api.register_exec("webrtc.set_remote_answer", cmd_set_remote_answer)
-    api.register_exec("webrtc.set_remote_offer", cmd_set_remote_offer)
     api.register_exec("webrtc.close", cmd_close)
     api.register_exec("webrtc.status", cmd_status)
 

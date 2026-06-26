@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Blender Texture Protocol",
     "blender": (4, 0, 0),
-    "version": (0, 3, 0),
+    "version": (0, 4, 0),
     "category": "Development",
     "author": "fangzhangmnm",
     "description": "Let external editors (WebPaint / AtlasMaker) read & write textures in Blender without import/export",
