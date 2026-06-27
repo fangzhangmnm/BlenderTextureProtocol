@@ -2,7 +2,8 @@
 localhost HTTP server.
 
 Default off; opt-in via Preferences. Only binds to 127.0.0.1 — never
-LAN. For LAN / remote access, use WebRTC pairing (slice 1+).
+LAN. For another device, point the editor at an HTTPS URL that reaches
+this server (e.g. via `tailscale serve`); no change needed here.
 """
 import json
 import threading

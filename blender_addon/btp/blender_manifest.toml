@@ -1,9 +1,9 @@
 schema_version = "1.0.0"
 
 id = "btp"
-version = "0.4.1"
+version = "0.5.0"
 name = "Blender Texture Protocol"
-tagline = "外部贴图编辑器同步纹理 (HTTP / WebRTC)"
+tagline = "外部贴图编辑器同步纹理 (localhost HTTP)"
 maintainer = "fangzhangmnm <mnmfangzhang@gmail.com>"
 type = "add-on"
 
@@ -15,18 +15,5 @@ license = [
 
 tags = ["Development", "Pipeline"]
 
-wheels = [
-    "./wheels/aioice-0.10.2-py3-none-any.whl",
-    "./wheels/aiortc-1.14.0-py3-none-any.whl",
-    "./wheels/av-14.0.0-py3-none-any.whl",
-    "./wheels/cffi-2.0.0-cp311-cp311-win_amd64.whl",
-    "./wheels/cryptography-48.0.0-cp311-abi3-win_amd64.whl",
-    "./wheels/dnspython-2.8.0-py3-none-any.whl",
-    "./wheels/google_crc32c-1.8.0-cp311-cp311-win_amd64.whl",
-    "./wheels/ifaddr-0.2.0-py3-none-any.whl",
-    "./wheels/pycparser-3.0-py3-none-any.whl",
-    "./wheels/pyee-13.0.1-py3-none-any.whl",
-    "./wheels/pylibsrtp-1.0.0-cp310-abi3-win_amd64.whl",
-    "./wheels/pyopenssl-26.2.0-py3-none-any.whl",
-    "./wheels/typing_extensions-4.15.0-py3-none-any.whl",
-]
+# No third-party wheels: pure stdlib (http.server). The WebRTC transport that
+# needed aiortc/av/cryptography/… was removed in addon 0.5.0.

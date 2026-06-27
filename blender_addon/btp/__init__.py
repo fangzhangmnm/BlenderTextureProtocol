@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Blender Texture Protocol",
     "blender": (4, 0, 0),
-    "version": (0, 4, 1),
+    "version": (0, 5, 0),
     "category": "Development",
     "author": "fangzhangmnm",
     "description": "Let external editors (WebPaint / AtlasMaker) read & write textures in Blender without import/export",
@@ -11,11 +11,10 @@ bl_info = {
 
 import bpy
 
-# Third-party deps (aiortc + crypto + ...) are declared in
-# blender_manifest.toml's `wheels = [...]` field. Blender 4.2+ installs
-# them into a per-extension isolated env so they don't pollute global
-# Python — that's why we no longer manipulate sys.path here.
-from . import bridge, http_server, operators, panels, signaling, webrtc
+# Pure stdlib now (http.server) — no third-party wheels. The WebRTC remote
+# transport (aiortc + crypto + av + …) was removed; remote access is a direct
+# HTTPS URL to this localhost server (e.g. via `tailscale serve`).
+from . import bridge, http_server, operators, panels
 
 
 class BTPPreferences(bpy.types.AddonPreferences):
@@ -66,9 +65,7 @@ def _on_http_toggle(prefs):
 def register():
     bridge.start()
     operators.register()
-    signaling.register()
     panels.register()
-    webrtc.register()
     bpy.utils.register_class(BTPPreferences)
     # Per-session consent (BTP hard rule: consent before opening any port each
     # session). The enable toggle is a *persisted* AddonPreference, so without
@@ -90,8 +87,6 @@ def unregister():
     except RuntimeError:
         pass
     http_server.stop()
-    webrtc.unregister()
     panels.unregister()
-    signaling.unregister()
     operators.unregister()
     bridge.stop()

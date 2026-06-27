@@ -11,6 +11,10 @@ Endpoints:
     POST   /v1/textures/{name}/rename
     GET    /v1/selection
     POST   /v1/exec
+    GET    /v1/references
+    GET    /v1/references/{name}
+    PUT    /v1/references/{name}    (upsert: { image, placement, opacity })
+    DELETE /v1/references/{name}
 
 ID is the image's `name` (Blender enforces uniqueness with .001 suffix).
 URL component must be percent-encoded. Rename uses an explicit endpoint.
@@ -290,6 +294,78 @@ def register_exec(command, handler):
     _EXEC_REGISTRY[command] = handler
 
 
+# ---------- references (ADR-0001) ----------
+# A reference = metadata-only Image Empty that links a texture by name. Pixels
+# live in /v1/textures (sent first). Identity = custom prop btp_ref. Upsert by
+# name. See operators.BTP_OT_upsert_reference.
+
+def _reference_metadata(obj):
+    img = obj.data
+    color = list(obj.color) if hasattr(obj, "color") else [1, 1, 1, 1]
+    return {
+        "name": obj.get("btp_ref"),
+        "image": img.name if img else None,
+        "object": obj.name,
+        "location": list(obj.location),
+        "rotation": list(obj.rotation_euler),
+        "opacity": color[3] if len(color) >= 4 else 1.0,
+    }
+
+
+def _iter_reference_empties():
+    return [o for o in bpy.data.objects if o.type == "EMPTY" and o.get("btp_ref")]
+
+
+def handle_list_references(body=None, query=None, headers=None):
+    items = [_reference_metadata(o) for o in _iter_reference_empties()]
+    items.sort(key=lambda x: x["name"] or "")
+    return _json(items)
+
+
+def handle_get_reference(name, body=None, query=None, headers=None):
+    for o in _iter_reference_empties():
+        if o.get("btp_ref") == name:
+            return _json(_reference_metadata(o))
+    return _error(404, "reference_not_found", f"No reference named '{name}'")
+
+
+def handle_put_reference(name, body=None, query=None, headers=None):
+    """Upsert by name: create the reference if absent, else relink + re-place."""
+    try:
+        payload = json.loads(body.decode("utf-8")) if body else {}
+    except json.JSONDecodeError:
+        return _error(400, "bad_json", "Body must be JSON")
+    image = payload.get("image")
+    if not image:
+        return _error(400, "missing_image", "Body must contain image (a texture name)")
+    if image not in bpy.data.images:
+        return _error(404, "texture_not_found",
+                      f"No image named '{image}' — send the texture first")
+    placement = payload.get("placement") or {}
+    opacity = payload.get("opacity", 1.0)
+    result = _call_with_ui_context(
+        bpy.ops.btp.upsert_reference,
+        name=name, image=image,
+        placement_json=json.dumps(placement), opacity=float(opacity))
+    if 'FINISHED' not in result:
+        return _error(500, "operator_failed", f"upsert_reference returned {result}")
+    _push_undo(f"BTP: reference {name}")
+    for o in _iter_reference_empties():
+        if o.get("btp_ref") == name:
+            return _json(_reference_metadata(o))
+    return _error(500, "upsert_failed", "Operator finished but reference not found")
+
+
+def handle_delete_reference(name, body=None, query=None, headers=None):
+    if not any(o.get("btp_ref") == name for o in _iter_reference_empties()):
+        return _error(404, "reference_not_found", f"No reference named '{name}'")
+    result = _call_with_ui_context(bpy.ops.btp.delete_reference, name=name)
+    if 'FINISHED' not in result:
+        return _error(500, "operator_failed", f"delete_reference returned {result}")
+    _push_undo(f"BTP: delete reference {name}")
+    return _json({"deleted": name})
+
+
 # ---------- helpers ----------
 
 def _current_selected_texture_name():
@@ -318,4 +394,8 @@ _ROUTES = [
     ("POST", r"^/v1/textures/([^/]+)/rename$",        handle_rename_texture),
     ("GET",  r"^/v1/selection$",                      handle_selection),
     ("POST", r"^/v1/exec$",                           handle_exec),
+    ("GET",    r"^/v1/references$",                   handle_list_references),
+    ("GET",    r"^/v1/references/([^/]+)$",           handle_get_reference),
+    ("PUT",    r"^/v1/references/([^/]+)$",           handle_put_reference),
+    ("DELETE", r"^/v1/references/([^/]+)$",           handle_delete_reference),
 ]

@@ -1,7 +1,7 @@
 """
 Cross-thread dispatcher.
 
-HTTP / WebRTC handlers run in background threads. They cannot touch
+HTTP handlers run in background threads. They cannot touch
 bpy directly (bpy is not thread-safe; mutations must happen on the
 main thread). They submit a callable to dispatch_to_main(), which
 queues it; the main thread drains the queue via bpy.app.timers and
