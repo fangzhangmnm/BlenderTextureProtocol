@@ -120,7 +120,7 @@ edit. Project-local; doesn't affect external contributors.
   redo (Ctrl-Shift-Z) is unreliable. Blender's image data lives on a
   separate `ED_image_undo_*` stack that doesn't yet have a Python entry
   point. Workaround: don't rely on redo across BTP mutations. See
-  [`docs/blender5-api-notes.md`](./docs/blender5-api-notes.md).
+  [`docs/20260527-blender5-api-notes.md`](./docs/20260527-blender5-api-notes.md).
 - **localhost binds `127.0.0.1`** — not exposed to LAN (a LAN port scan
   can't even see it). Cross-device access goes through the WebRTC transport,
   not by exposing the HTTP port. Why WebRTC even on a LAN: an HTTPS PWA may
